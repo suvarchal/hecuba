@@ -106,12 +106,7 @@ ArrayDataStore::ArrayDataStore(const char *table, const char *keyspace, CassSess
         this->cache = new CacheTable(table_meta, session, config);
         this->cache->get_writer()->enable_lazy_write();
 
-        std::vector<std::map<std::string, std::string>> read_keys_names(keys_names.begin(), (keys_names.end() - 1));
-        std::vector<std::map<std::string, std::string>> read_columns_names = columns_names;
-        read_columns_names.insert(read_columns_names.begin(), keys_names.back());
-
-        table_meta = new TableMetadata(table, keyspace, read_keys_names, read_columns_names, session);
-        this->read_cache = new CacheTable(table_meta, session, config);
+        this->read_cache = this->cache; // TODO Remove 'read_cache' references
 
     } else { // COLUMNAR access...
         if (!arrow_enabled){
@@ -184,7 +179,6 @@ ArrayDataStore::ArrayDataStore(const char *table, const char *keyspace, std::sha
 
 ArrayDataStore::~ArrayDataStore() {
     delete (this->cache);
-    delete (this->read_cache);
     delete (this->metadata_cache);
     delete (this->metadata_read_cache);
 };
@@ -258,7 +252,7 @@ void ArrayDataStore::update_metadata(const uint64_t *storage_id, ArrayMetadata *
 
 /* Generate a token for composite key (storage_id, cluster_id)
  * Args:
- *      storage_id: Points to a CassUuid
+ *      storage_id: Points to a UUID
  *      cluster_id: Contains a cluster_id
  * Returns an int64_t with the token that Cassandra assigns to the composite key
  */
@@ -274,22 +268,15 @@ int64_t murmur(const uint64_t *storage_id, const uint32_t cluster_id) {
             sidBE_low  = *(storage_id+1);
             cidBE =  cluster_id;
         } else {  // LittleEndian // --> Transform to BigEndian needed.
-            //Transform the fields from the cassandra 'CassUuid' type. Check also parse_uuid from HCache.cpp
-            uint32_t time_low = htobe32((*storage_id) & 0xFFFFFFFF);
-            uint16_t time_mid = htobe16(((*storage_id)>>32) & 0xFFFF);
-            uint16_t time_hi  = htobe16(((*storage_id)>>48));
-            sidBE_high        = (time_low | ((uint64_t) time_mid)<<32 | ((uint64_t)time_hi)<<48 );
-
-            uint64_t node     = htobe64((*(storage_id+1)) & 0xFFFFFFFFFFFF);
-            uint16_t clock    = htobe16((*(storage_id+1))>>48);
-            sidBE_low         = node | clock; //This works because 'node' has been translated to BigEndian
+            sidBE_high = *storage_id;
+            sidBE_low  = *(storage_id+1);
 
             cidBE = htobe32(cluster_id);
             sidlenBE = htobe16(sidlenBE);
             cidlenBE = htobe16(cidlenBE);
         }
         char* p = mykey;
-        memcpy(p, &sidlenBE, sizeof(sidlenBE)); // The 'CassUuid' type
+        memcpy(p, &sidlenBE, sizeof(sidlenBE));
         p+= sizeof(sidlenBE);
         memcpy(p, &sidBE_high, sizeof(sidBE_high));
         p+= sizeof(sidBE_high);
@@ -353,6 +340,9 @@ void ArrayDataStore::wait_stores(void) const {
     cache->wait_elements();
 }
 
+CacheTable* ArrayDataStore::getWriteCache(void) const {
+    return cache;
+}
 
 /* get_row_elements - Calculate #elements per dimension 
  * FIXME This code MUST BE equal to the one in NumpyStorage (No questions please, I cried also) and on SpaceFilling.cpp
@@ -824,20 +814,12 @@ void ArrayDataStore::read_numpy_from_cas_by_coords(const uint64_t *storage_id, A
 
 	SpaceFillingCurve::PartitionGenerator *
 	partitions_it = SpaceFillingCurve::make_partitions_generator(metadata, nullptr, coord);
-	std::set<int32_t> clusters = {};
-
+	std::list<Partition> clusters = {};
 	while (!partitions_it->isDone()) {
-		clusters.insert(partitions_it->computeNextClusterId());
+		clusters.push_back(partitions_it->getNextPartition());
 	}
-
-    bool cached = false; // Is there any cluster loaded? Needed to distinguish the case where there is no data at all
-	std::set<int32_t>::iterator it = clusters.begin();
+	std::list<Partition>::iterator it = clusters.begin();
 	for (; it != clusters.end(); ++it) {
-        auto ret = loaded_cluster_ids.insert((uint32_t)*it);
-        if (ret.first == loaded_cluster_ids.end()) {
-            throw ModuleException("ERROR IN SET");
-        }
-        if (ret.second) { // New insert
             buffer = (char *) malloc(keys_size);
             //UUID
             c_uuid = new uint64_t[2]{*storage_id, *(storage_id + 1)};
@@ -846,25 +828,26 @@ void ArrayDataStore::read_numpy_from_cas_by_coords(const uint64_t *storage_id, A
             memcpy(buffer, &c_uuid, sizeof(uint64_t *));
             offset = sizeof(uint64_t *);
             //Cluster id
-            memcpy(buffer + offset, &(*it), sizeof(*it));
+            memcpy(buffer + offset, &(*it).cluster_id, sizeof((*it).cluster_id));
+            //JJblock_id
+            offset += sizeof((*it).cluster_id);
+            memcpy(buffer + offset, &(*it).block_id, sizeof((*it).block_id));
+
             //We fetch the data
             TupleRow *block_key = new TupleRow(keys_metas, keys_size, buffer);
             result = read_cache->get_crow(block_key);
             delete (block_key);
             //build cluster
             all_results.insert(all_results.end(), result.begin(), result.end());
-            for (const TupleRow *row:result) {
-                block = (int32_t *) row->get_element(0);
-                char **chunk = (char **) row->get_element(1);
+            for (const TupleRow *row:result) { // A single row should be returned
+                //block = (int32_t *) row->get_element(0);
+                char **chunk = (char **) row->get_element(0);
                 all_partitions.emplace_back(
-                        Partition((uint32_t) *it + half_int, (uint32_t) *block + half_int, *chunk));
+                        Partition((uint32_t) (*it).cluster_id + half_int, (uint32_t) (*it).block_id + half_int, *chunk));
             }
-        } else {
-            cached = true;
-        }
 	}
 
-	if (all_partitions.empty() && !cached) {
+	if (all_partitions.empty()) {
 		throw ModuleException("no npy found on sys");
 	}
 	partitions_it->merge_partitions(metadata, all_partitions, save);
@@ -890,7 +873,6 @@ int ArrayDataStore::open_arrow_file(std::string arrow_file_name) {
             if (err == ENOENT) { //File does not exist... retry
                 retries ++;
                 std::cout << "open_arrow_file  retry " << retries << "/"<< MAX_RETRIES << std::endl;
-                sleep(1);
             }
             if ((err != ENOENT) || (retries == MAX_RETRIES)) {
                 char buff[4096];
@@ -903,12 +885,26 @@ int ArrayDataStore::open_arrow_file(std::string arrow_file_name) {
     return fdIn;
 }
 
+#define PORT "3490" // the port client will be connecting to 
+
+//#define MAXDATASIZE 100 // max number of bytes we can get at once 
+#define MAXDATASIZE 4096 // max number of bytes we can get at once 
+
+// get sockaddr, IPv4 or IPv6:
+void *get_in_addr(struct sockaddr *sa)
+{
+    if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in*)sa)->sin_addr);
+    }
+
+    return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
 
 /* Copy file 'dst'@'host' to 'src'
  * Uses the 'scp' function and the logged user
  */
 int scp(const char *host, const char *src, const char *dst) {
-
+/*
     //fprintf(stdout, " Remote copy %s from host %s to path %s\n", src, host, dst);
     // Get USERNAME
     char *user;
@@ -946,7 +942,126 @@ int scp(const char *host, const char *src, const char *dst) {
             }
     }
     return 0;
+*/
+
+    //JJfprintf(stdout, " Remote copy %s from host %s to path %s\n", src, host, dst);
+    int sockfd, numbytes;  
+    char buf[MAXDATASIZE];
+    struct addrinfo hints, *servinfo, *p;
+    int rv;
+    char s[INET6_ADDRSTRLEN];
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if ((rv = getaddrinfo(host, PORT, &hints, &servinfo)) != 0) {
+        std::cerr<< "getaddrinfo: " << gai_strerror(rv) << std::endl;
+        return -1;
+    }
+
+
+    // loop through all the results and connect to the first we can
+    for(p = servinfo; p != NULL; p = p->ai_next) {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype,
+                p->ai_protocol)) == -1) {
+            perror("client: socket");
+            continue;
+        }
+
+        if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sockfd);
+            char b[256];
+            sprintf(b, "client: connect to %s:", host);
+            perror(b);
+            continue;
+        }
+
+        break;
+    }
+
+    if (p == NULL) {
+        std::cerr<< "client: failed to connect to "<< host << std::endl;
+        return -2;
+    }
+
+    inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr),
+        s, sizeof s);
+    //JJfprintf(stdout,"client: connecting to %s\n", s);
+
+    freeaddrinfo(servinfo); // all done with this structure
+
+    size_t filesize = 0;
+    //uint8_t* mmsrc;
+
+    int pathsize = strlen(src); //+4 -> int size (it will contain path's size)
+    //JJfprintf(stdout,"path    : %s\n", src);
+
+    if (send(sockfd, &pathsize, sizeof(pathsize), 0) == -1) { //TODO: htons --> ntoh
+        perror("send");
+        exit(-1);
+    }
+
+    if (send(sockfd, src, strlen(src), 0) == -1) {
+        perror("send");
+        exit(-1);
+    }
+
+    //JJfprintf(stdout,"before open\n");
+
+    const char* file = strrchr(src, '/');
+    char* dst_path = (char *) malloc(strlen(dst) + 1 + strlen(file));
+    //char* prova = strdup(dst);
+    //JJfprintf(stdout,"file: %s\n", file);
+    //fprintf(stdout,"dst_path: %s\n", dst_path);
+    //printf("strncat: %s\n", strncat(prova, file, strlen(file)));
+
+    //strncat(dst_path, file, strlen(file));
+    size_t i,j;
+    for (i=0; i< strlen(dst); i++)
+        dst_path[i] = dst[i];
+    for (j=0; j< strlen(file); j++,i++)
+        dst_path[i] = file[j];
+    dst_path[i]='\0';
+    //JJfprintf(stdout,"dst_path after strcat: %s\n", dst_path);
+
+    int newfile = open(dst_path, O_CREAT | O_RDWR, 0600);
+    if (newfile < 0) {
+        perror("client: unable to open destination file");
+        std::cerr << "client: Creating file " << dst << " error: "<< strerror(errno) << std::endl;
+        return(-1);
+    }
+    //JJfprintf(stdout,"before reciving from server\n");
+
+    numbytes = recv(sockfd, buf, MAXDATASIZE-1, 0);
+    filesize += numbytes;
+    while(numbytes > 0) {
+        buf[numbytes] = '\0';
+        //printf("client: received '%s' from server\n",buf);
+        write(newfile, buf, numbytes);
+        numbytes = recv(sockfd, buf, MAXDATASIZE-1, 0);
+        filesize += numbytes;
+    }
+    if (numbytes<0) {
+        std::cerr<< "RECEIVE FAILED  Remote copy " << src <<" from host " << host << " to path " << dst << std::endl;
+        return(-1);
+    }
+
+    //JJfprintf(stdout,"before mmap\n");
+    //JJfflush(stdout);
+    //mmsrc = (uint8_t*) mmap(NULL, filesize, PROT_READ, MAP_SHARED, newfile, 0);
+    //if (mmsrc == MAP_FAILED) {
+    //    perror("client: unable to mmap");
+    //    exit(1);
+    //}
+    close(newfile);
+    free(dst_path);
+
+
+   return 0; 
+
 }
+
 
 /* itsme: Check if 'target' hostname corresponds to this local node */
 bool itsme(const char *target) {
@@ -976,24 +1091,40 @@ bool itsme(const char *target) {
 int get_remote_file(const char *host, const std::string sourcepath, const std::string filename, const std::string destination_path)
 {
     int r = 0;
-    // Check that the file exists to avoid copy
+    //std::cerr << "destination_path: " << destination_path << std::endl;
+    //std::cerr << "filename: " << filename << std::endl;
+
     if (access((destination_path + filename).c_str(), R_OK) != 0) { //File DOES NOT exist
-        r = mkdir((destination_path).c_str(), 0770);
-        if (r<0) {
+        size_t path_size = strlen(destination_path.c_str());
+        char aux_path[path_size+1];
+        char *p;
+
+        strcpy(aux_path, destination_path.c_str());
+
+        // Check (and create) destination_path recursively...
+        for (p = aux_path+1; *p != NULL; ++p) {
+            if (*p =='/') {
+                *p = '\0';
+                if (mkdir(aux_path, 0770) < 0) {
+                    if (errno != EEXIST) {
+                        std::cerr<<" scp: mkdir initial path "<< aux_path <<" failed  at "<< std::getenv("HOSTNAME") <<std::endl;
+                        perror("scp: mkdir");
+                        exit(1); //FIXME
+                    }
+                }
+                *p = '/';
+            }
+        }
+        if (mkdir(aux_path, 0770) < 0) { //last directory in path may not end with '/', so it is treated separately
             if (errno != EEXIST) {
-                std::cerr<<" scp: mkdir "<< destination_path <<" failed  at "<< std::getenv("HOSTNAME") <<std::endl;
+                std::cerr<<" scp: mkdir final path "<< aux_path <<" failed  at "<< std::getenv("HOSTNAME") <<std::endl;
                 perror("scp: mkdir");
                 exit(1); //FIXME
             }
-            //} else {
-            //    std::cout<<" scp: created directory "<<(remote_path + ksp)<<std::endl;
         }
-
-        // Get a copy of arrow_file_name to REMOTES path
         r = scp(host, (sourcepath + filename).c_str(), (destination_path).c_str());
-    //} else {
-    //    std::cout<<" scp: Already existing file "<<(remote_path + arrow_file_name)<<std::endl;
     }
+
     return r;
 }
 
@@ -1131,6 +1262,42 @@ void ArrayDataStore::read_numpy_from_cas_arrow(const uint64_t *storage_id, Array
         for (const TupleRow *row:result) { // FIXME Theoretically, there should be a single row. ENRIC ensure that any data in the buffer table for the current {storage_id, col_id} has been transfered to the arrow table! And in this case, just peek the first row from the vector
             uint64_t *arrow_addr = (uint64_t *) row->get_element(0);
             uint32_t *arrow_size = (uint32_t *) row->get_element(1);
+
+            // CHECK len(fd_in) == arrow_size? otherwise... wait. In case a 'scp' is in flight but still not finished
+
+            //int filesize = lseek(fdIn, 0, SEEK_END); //TODO DEBUG only
+            //if (filesize < 0) {
+            //    perror("hecuba: unable to lseek to end of file");
+            //    exit(1);
+            //}
+            //std::cout << "File size from lseek: " << filesize << std::endl;
+
+            uint32_t filesize = 0;
+            int retries = 0;
+            do {
+                filesize = lseek(fdIn, 0, SEEK_END);
+                //std::cout << "File size from lseek: " << filesize << std::endl;
+                if (filesize < 0) {
+                    perror("unable to lseek to end of file");
+                    throw ModuleException("lseek error " + arrow_file_name);
+                } else if (filesize < *arrow_size) {
+                    ++retries;
+                    std::cout << "File size from lseek: " << filesize << std::endl;
+                    std::cout << "File size from Cassandra: " << *arrow_size << std::endl;
+                    std::cout << "coherent arrow file size  retry " << retries << "/"<< MAX_RETRIES << std::endl;
+                    sleep(1);
+                }
+                //int start_file = lseek(fdIn, 0, SEEK_SET);
+                //if (start_file < 0) {
+                //    perror("unable to lseek to start of file");
+                //    throw ModuleException("lseek error " + arrow_file_name);
+                //}
+
+            } while (filesize < *arrow_size and retries < MAX_RETRIES);
+            if (retries == MAX_RETRIES) {
+                throw ModuleException("incomplete arrow file error");
+            }
+
 
             //std::cout<< "read_numpy_from_cas_arrow addr="<<*arrow_addr<<" size="<<*arrow_size<<std::endl;
             off_t page_addr;

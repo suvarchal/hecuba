@@ -18,7 +18,7 @@ class StorageNumpyTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        config.session.execute("DROP KEYSPACE IF EXISTS {}".format(config.execution_name), timeout=60)
+        #config.session.execute("DROP KEYSPACE IF EXISTS {}".format(config.execution_name), timeout=60)
         config.execution_name = cls.old
 
     # Create a new keyspace per test
@@ -364,6 +364,7 @@ class StorageNumpyTest(unittest.TestCase):
 
         self.assertEqual(i + 1, len(blocks))
 
+    @unittest.skip("np_split is not maintained...")
     def test_split_already_persistent(self):
 
         bn, bm = (2, 1)
@@ -1230,6 +1231,28 @@ class StorageNumpyTest(unittest.TestCase):
         s = StorageNumpy(n,"test_simple_negative")
         ss = s[2::2]
         self.assertTrue(ss[-1] == n[2::2][-1])
+
+    # This code tries to access an out of bounds array
+    def test_out_of_bounds(self):
+        n = np.arange(1000).reshape(10,10,10)
+        coordinates = (slice(50, 150, None), slice(50, 150, None), slice(5, 150, None))
+        s = StorageNumpy(n, "KK")
+        t  = s[coordinates]
+        t - 1   # Should not fail
+        t-= 1   # Should not fail
+
+    def test_arrow_access(self):
+        n = np.arange(50*50).reshape(50,50)
+        s = StorageNumpy(n, "test_arrow_access")
+        s.sync()
+        del s
+        s = StorageNumpy(None, "test_arrow_access")
+        x = s[:, 20]
+        self.assertTrue(np.array_equal(x, n[:,20]))
+        y = s[:, 30]
+        self.assertTrue(np.array_equal(y, n[:,30]))
+        z = s[:, 49]
+        self.assertTrue(np.array_equal(z, n[:,49]))
 
 
 if __name__ == '__main__':

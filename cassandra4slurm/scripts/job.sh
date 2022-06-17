@@ -27,14 +27,20 @@ HECUBA_ENVIRON=$C4S_HOME/conf/hecuba_environment
 MODULE_PATH=$HECUBA_ROOT/bin/cassandra4slurm
 CFG_FILE=$C4S_HOME/conf/cassandra4slurm.cfg
 NODEFILE=$C4S_HOME/hostlist-"$UNIQ_ID".txt
+
+# CASSFILETOSYNC is a special file that is consulted by other scripts,
+# to ensure the cluster is UP.
+# CASSFILE is used while Cassandra is starting up.
 export CASSFILE=$C4S_HOME/casslist-"$UNIQ_ID".txt
+export CASSFILETOSYNC=$C4S_HOME/casslistDONE-"$UNIQ_ID".txt
+
 export APPFILE=$C4S_HOME/applist-"$UNIQ_ID".txt
 APPPATHFILE=$C4S_HOME/app-"$UNIQ_ID".txt
 PYCOMPSS_FLAGS_FILE=$C4S_HOME/pycompss-flags-"$UNIQ_ID".txt
 PYCOMPSS_FILE=$C4S_HOME/pycompss-"$UNIQ_ID".sh
 SNAPSHOT_FILE=$C4S_HOME/cassandra-snapshot-file-"$UNIQ_ID".txt
 RECOVER_FILE=$C4S_HOME/cassandra-recover-file-"$UNIQ_ID".txt
-rm -f $NODEFILE $CASSFILE $APPFILE
+rm -f $NODEFILE $CASSFILE $CASSFILETOSYNC $APPFILE
 scontrol show hostnames $SLURM_NODELIST > $NODEFILE
 
 source $CFG_FILE
@@ -77,11 +83,13 @@ tail -n $CASSANDRA_NODES $NODEFILE > $CASSFILE
 head -n $APP_NODES $NODEFILE > $APPFILE
 export APPNODELIST=$(cat $APPFILE | tr '\n' ',' | sed "s/,/$full_iface,/g" | rev | cut -c 2- | rev)
 
-echo "[DEBUG] iter="$iter
-echo "[DEBUG] app_count="$app_count
-echo "[DEBUG] APP_NODES="$APP_NODES
-echo "[DEBUG] CASSANDRA_NODES="$CASSANDRA_NODES
-echo "[DEBUG] DISJOINT="$DISJOINT
+source $MODULE_PATH/hecuba_debug.sh
+
+DBG " iter="$iter
+DBG " app_count="$app_count
+DBG " APP_NODES="$APP_NODES
+DBG " CASSANDRA_NODES="$CASSANDRA_NODES
+DBG " DISJOINT="$DISJOINT
 
 N_NODES=$(cat $CASSFILE | wc -l)
 
@@ -131,7 +139,7 @@ if [ "$(cat $RECOVER_FILE)" != "" ]; then
 fi
 
 echo "STARTING UP CASSANDRA..."
-echo "I am $(hostname)."
+DBG " I am $(hostname)."
 #export REPLICA_FACTOR=2
 
 # If template is not there, it is copied from cassandra config folder 
@@ -150,12 +158,15 @@ seedlist=`head -n 2 $CASSFILE`
 seeds=`echo $seedlist | sed "s/ /-$iface,/g"`
 seeds=$seeds-$iface #using only infiniband atm, will change later
 sed "s/.*seeds:.*/          - seeds: \"$seeds\"/" $C4S_HOME/conf/template.yaml | sed "s/.*rpc_interface:.*/rpc_interface: $iface/" | sed "s/.*listen_interface:.*/listen_interface: $iface/" | sed "s/.*listen_address:.*/#listen_address: localhost/" | sed "s/.*rpc_address:.*/#rpc_address: localhost/" | sed "s/.*initial_token:.*/#initial_token:/" > $C4S_HOME/conf/template-aux-"$SLURM_JOB_ID".yaml
-ls -la $C4S_HOME/conf/template-aux-"$SLURM_JOB_ID".yaml
+
+
+DBG $(ls -la $C4S_HOME/conf/template-aux-"$SLURM_JOB_ID".yaml)
 
 TIME_START=`date +"%T.%3N"`
 echo "Launching Cassandra in the following hosts: $casslist"
 export CASSANDRA_NODELIST=$(echo $casslist | sed -e 's+ +,+g')
-echo "CASSANDRA_NODELIST var: "$CASSANDRA_NODELIST
+
+DBG " CASSANDRA_NODELIST var: "$CASSANDRA_NODELIST
 
 # Clearing data from previous executions and checking symlink coherence
 srun --nodelist=$CASSANDRA_NODELIST --ntasks=$N_NODES --ntasks-per-node=1 --cpus-per-task=1 --nodes=$N_NODES $MODULE_PATH/tmp-set.sh $CASS_HOME $DATA_HOME $COMM_HOME $SAV_CACHE $ROOT_PATH $CLUSTER $UNIQ_ID
@@ -168,8 +179,8 @@ then
     srun --nodelist=$CASSANDRA_NODELIST --ntasks=$N_NODES --ntasks-per-node=1 --cpus-per-task=1 --nodes=$N_NODES $MODULE_PATH/recover.sh $ROOT_PATH $UNIQ_ID
     RECOVERTIME2=`date +"%T.%3N"`
 
-    echo "[STATS] Recover process initial datetime: $RECOVERTIME1"
-    echo "[STATS] Recover process final datetime: $RECOVERTIME2"
+    DBG "[DEBUG] Recover process initial datetime: $RECOVERTIME1"
+    DBG "[DEBUG] Recover process final datetime: $RECOVERTIME2"
 
     MILL1=$(echo $RECOVERTIME1 | cut -c 10-12)
     MILL2=$(echo $RECOVERTIME2 | cut -c 10-12)
@@ -231,6 +242,7 @@ else
     exit_bad_node_status
 fi
 
+
 # THIS IS THE APPLICATION CODE EXECUTING SOME TASKS USING CASSANDRA DATA, ETC
 echo "CHECKING CASSANDRA STATUS: "
 first_node=`head -n1 $CASSFILE`"$CASS_IFACE"
@@ -258,6 +270,9 @@ if [ "0$SCHEMA" != "0" ]; then
   sleep 10
 fi
 
+# CASSANDRA UP AND RUNNING... SYNC WITH OTHER SCRIPTS...
+cp $CASSFILE $CASSFILETOSYNC
+
 # Application launcher
 if [ "$APP_NODES" != "0" ]; then
     APP_AND_PARAMS=$(cat $APPPATHFILE)
@@ -282,7 +297,7 @@ if [ "$APP_NODES" != "0" ]; then
         APP_NODELIST=$(cat $APPFILE | tr '\n' ',')
         SLURM_JOB_NUM_NODES=$APP_NODES SLURM_NTASKS=$(( $APP_NODES * $C4S_COMPSS_CORES )) SLURM_JOB_NODELIST=${APP_NODELIST::-1} bash $PYCOMPSS_FILE "-$iface" # Params - 1st: interface
     else
-        echo "RUNNING IN $APP_NODES APP_NODES WITH NTASKS_PERNODE $SLURM_NTASKS_PER_NODE, NTASKS $SLURM_NTASKS AND NPROCS $SLURM_NPROCS"
+        DBG " RUNNING IN $APP_NODES APP_NODES WITH NTASKS_PERNODE $SLURM_NTASKS_PER_NODE, NTASKS $SLURM_NTASKS AND NPROCS $SLURM_NPROCS"
         SLURM_JOB_NUM_NODES=$APP_NODES source $MODULE_PATH/app_node.sh $UNIQ_ID
     fi
 else
@@ -302,7 +317,7 @@ then
     TIME1=`date +"%T.%3N"`
     SNAP_NAME="$THETIME"
     # Looping over the assigned hosts until the snapshots are confirmed
-    echo "Launching snapshot tasks on nodes $CASSANDRA_NODELIST"
+    DBG " Launching snapshot tasks on nodes $CASSANDRA_NODELIST"
 
     source $MODULE_PATH/snapshot.sh $SNAP_NAME $ROOT_PATH $CLUSTER $UNIQ_ID
 
@@ -320,9 +335,8 @@ then
     done
     
     TIME2=`date +"%T.%3N"`
-
-    echo "[STATS] Snapshot initial datetime: $TIME1"
-    echo "[STATS] Snapshot final datetime: $TIME2" 
+    DBG " Snapshot initial datetime: $TIME1"
+    DBG " Snapshot final datetime: $TIME2"
 
     MILL1=$(echo $TIME1 | cut -c 10-12)
     MILL2=$(echo $TIME2 | cut -c 10-12)

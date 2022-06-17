@@ -7,6 +7,8 @@
 #include "StorageInterface.h"
 #include <set>
 
+#include <string.h>
+
 
 class ArrayDataStore {
 
@@ -46,6 +48,7 @@ public:
     std::list<std::tuple<uint64_t, uint32_t, uint32_t, std::vector<uint32_t>>> get_block_ids(ArrayMetadata &metadata) const;
     void wait_stores(void) const;
 
+    CacheTable* getWriteCache(void) const ;
 protected:
 
     void store_numpy_partition_into_cas(const uint64_t *storage_id , Partition part) const;
@@ -66,6 +69,8 @@ private:
     int open_arrow_file(std::string arrow_file_name) ;
     int find_and_open_arrow_file(const uint64_t * storage_id, const uint32_t cluster_id, const std::string arrow_file_name);
     std::set<uint32_t> loaded_cluster_ids;
+
+    void *get_in_addr(struct sockaddr *sa);
 };
 
 

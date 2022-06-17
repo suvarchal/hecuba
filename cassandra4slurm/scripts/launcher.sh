@@ -20,6 +20,8 @@ CFG_FILE=$C4S_HOME/conf/cassandra4slurm.cfg
 HECUBA_ENV=$C4S_HOME/conf/hecuba_environment
 HECUBA_TEMPLATE_FILE=$MODULE_PATH/hecuba_environment.template
 
+source $MODULE_PATH/hecuba_debug.sh
+
 UNIQ_ID="c4s"$(echo $RANDOM | cut -c -5)
 DEFAULT_NUM_NODES=4
 DEFAULT_MAX_TIME="04:00:00"
@@ -32,13 +34,12 @@ function set_workspace () {
     mkdir -p $C4S_HOME/logs
     mkdir -p $C4S_HOME/conf
     DEFAULT_DATA_PATH=/scratch/tmp
-    DEFAULT_CASSANDRA=$HECUBA_ROOT/cassandra-d8tree
     echo "#This is a Cassandra4Slurm configuration file. Every variable must be set and use an absolute path." > $CFG_FILE
     echo "# LOG_PATH is the default log directory." >> $CFG_FILE
     echo "LOG_PATH=\"$HOME/.c4s/logs\"" >> $CFG_FILE
     echo "# DATA_PATH is a path to be used to store the data in every node. Using the SSD local storage of each node is recommended." >> $CFG_FILE
     echo "DATA_PATH=\"$DEFAULT_DATA_PATH\"" >> $CFG_FILE
-    echo "CASS_HOME=\"$DEFAULT_CASSANDRA\"" >> $CFG_FILE
+    echo "CASS_HOME=\"\$HECUBA_ROOT/cassandra-d8tree\"" >> $CFG_FILE
     echo "# SNAP_PATH is the destination path for snapshots." >> $CFG_FILE
     echo "SNAP_PATH=\"$DEFAULT_DATA_PATH/hecuba/snapshots\"" >> $CFG_FILE
 }
@@ -186,32 +187,6 @@ function test_if_cluster_up () {
     fi
 }
 
-function get_nodes_up () {
-    get_job_info
-    if [ "$JOB_ID" != "" ]
-    then
-        if [ "$JOB_STATUS" == "R" ]
-        then    
-            get_cluster_node 
-            #NODE_STATE_LIST=`ssh -q $NODE_ID "$CASS_HOME/bin/nodetool status" | sed 1,5d | sed '$ d' | awk '{ print $1 }'`
-            NODE_STATE_LIST=`$CASS_HOME/bin/nodetool -h $NODE_ID$CASS_IFACE status 2> /dev/null | sed 1,5d | sed '$ d' | awk '{ print $1 }'`
-            if [ "$NODE_STATE_LIST" != "" ]
-            then
-                NODE_COUNTER=0
-                for state in $NODE_STATE_LIST
-                do  
-                    if [ $state != "UN" ]
-                    then
-                        RETRY_COUNTER=$(($RETRY_COUNTER+1))
-                        break
-                    else
-                        NODE_COUNTER=$(($NODE_COUNTER+1))
-                    fi
-                done
-            fi
-        fi
-    fi
-}
 
 function get_max_of_two () {
     if [ $1 -gt $2 ]; then
@@ -231,6 +206,30 @@ function set_snapshot_value () {
     fi
 }
 
+
+function launch_arrow_helpers () {
+    # Launch the 'arrow_helper' tool at each node in NODES, and leave their logs in LOGDIR
+    NODES=$1
+    LOGDIR=$2
+    if [ ! -d $LOGDIR ]; then
+        DBG " Creating directory to store Arrow helper logs at [$LOGDIR]:"
+        mkdir -p $LOGDIR
+    fi
+    ARROW_HELPER=$HECUBA_ROOT/src/hecuba_repo/build/arrow_helper
+    ARROW_HELPER=$HECUBA_ROOT/bin/arrow_helper
+
+
+    for i in $(cat $NODES); do
+        DBG " Launching Arrow helper at [$i] Log at [$LOGDIR/arrow_helper.$i.out]:"
+        #ssh  $i $ARROW_HELPER >& $LOGDIR/arrow_helper.$i.out &
+        ssh  $i $ARROW_HELPER $LOGDIR/arrow_helper.$i.out &
+    done
+    #echo "INFO: Launching Arrow helper at [$NODES]:"
+	#CNAMES=$(sed ':a;N;$!ba;s/\n/,/g' $NODES)
+	#CNAMES=$(echo $CNAMES | sed "s/,/$CASS_IFACE,/g")$CASS_IFACE
+    #echo "INFO: Launching Arrow helper at [$CNAMES]:"
+    #srun -s --nodelist $NODES --ntasks-per-node=1 --cpus-per-task=4 $ARROW_HELPER
+}
 
 for i in "$@"; do
 case $i in
@@ -584,28 +583,19 @@ if [ "$ACTION" == "RUN" ]; then
     JOB_NUMBER=$(echo $SUBMIT_MSG | awk '{ print $NF }')
     echo $JOB_NUMBER $UNIQ_ID" " >> $C4S_JOBLIST
     echo "Please, be patient. It may take a while until it shows a correct status (and it may show some harmless errors during this process)."
-    RETRY_COUNTER=0
-    sleep 15
 
-    while [ "$NODE_COUNTER" != "$CASSANDRA_NODES" ] && [ $RETRY_COUNTER -lt $RETRY_MAX ]; do
-        echo "Checking..."
-        sleep 10
-	get_nodes_up
-    done
-    if [ "$NODE_COUNTER" == "$CASSANDRA_NODES" ]
-    then
-	while [ ! -f "$C4S_HOME/casslist-"$UNIQ_ID".txt" ]; do
-            sleep 3
+	while [ ! -f "$C4S_HOME/casslistDONE-"$UNIQ_ID".txt" ]; do
+        echo "Checking for Cassandra cluster up... "
+        get_job_info
+        sleep 5
 	done
-	sleep 3
-        echo "Cassandra Cluster with "$CASSANDRA_NODES" node(s) started successfully."
+    echo "Cassandra Cluster with "$CASSANDRA_NODES" node(s) started successfully."
 	CNAMES=$(sed ':a;N;$!ba;s/\n/,/g' $C4S_HOME/casslist-"$UNIQ_ID".txt)$CASS_IFACE
 	CNAMES=$(echo $CNAMES | sed "s/,/$CASS_IFACE,/g")
 	export CONTACT_NAMES=$CNAMES
 	echo "Contact names environment variable (CONTACT_NAMES) should be set to: $CNAMES"
-    else
-        echo "ERROR: Cassandra Cluster RUN timeout. Check STATUS."
-    fi 
+    launch_arrow_helpers $C4S_HOME/casslist-"$UNIQ_ID".txt $LOGS_DIR/$UNIQ_ID
+
 elif [ "$ACTION" == "STATUS" ] || [ "$ACTION" == "status" ]
 then
     # If there is a running Cassandra Cluster it prints the information of the nodes
@@ -738,9 +728,18 @@ then
     echo $JOB_NUMBER $UNIQ_ID" " >> $C4S_JOBLIST
 
     echo "Launching $TOTAL_NODES nodes to recover snapshot $input_snap"
-    sleep 5
-    echo "Launch still in progress. You can check it later with:"
-    echo "    $EXEC_NAME STATUS"
+    while [ ! -f "$C4S_HOME/casslistDONE-"$UNIQ_ID".txt" ]; do
+        echo "Checking for Cassandra cluster up... "
+        get_job_info
+        sleep 5
+    done
+    echo "Cassandra Cluster with "$CASSANDRA_NODES" node(s) started successfully."
+    CNAMES=$(sed ':a;N;$!ba;s/\n/,/g' $C4S_HOME/casslist-"$UNIQ_ID".txt)$CASS_IFACE
+    CNAMES=$(echo $CNAMES | sed "s/,/$CASS_IFACE,/g")
+    export CONTACT_NAMES=$CNAMES
+    echo "Contact names environment variable (CONTACT_NAMES) should be set to: $CNAMES"
+    launch_arrow_helpers $C4S_HOME/casslist-"$UNIQ_ID".txt $LOGS_DIR/$UNIQ_ID
+
 elif [ "$ACTION" == "STOP" ] || [ "$ACTION" == "stop" ]
 then
     # If there is a running Cassandra Cluster it stops it
