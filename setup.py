@@ -96,7 +96,7 @@ def setup_packages():
                     packages=['hecuba', 'storage'],  # find_packages(),
                     install_requires=['cassandra-driver>=3.7.1', 'numpy>=1.16'],
                     zip_safe=False,
-                    data_files=[('', extra_files)],
+                    #data_files=[('', extra_files)],
 
                     # metadata for upload to PyPI
                     license="Apache License Version 2.0",
