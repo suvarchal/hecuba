@@ -29,29 +29,29 @@ def cmake_build():
     except (IndexError, StopIteration):
         c_binding_path=None
 
-    try:
-        cmake_args=["cmake", "-H./hecuba_core", "-B./build"]
-        if c_binding_path:
-            cmake_args=cmake_args + [ "-DC_BINDING_INSTALL_PREFIX={}".format(c_binding_path)]
-            cmake_args=cmake_args + [ "-DPYTHON_VERSION=python{}.{}".format(sys.version_info.major, sys.version_info.minor)]
-        if subprocess.call(cmake_args) != 0:
-            raise EnvironmentError("error calling cmake")
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            # CMake not found error.
-            raise OSError(errno.ENOENT, os.strerror(errno.ENOENT), 'cmake')
-        else:
-            # Different error
-            raise e
+#    try:
+#        cmake_args=["cmake", "-H./hecuba_core", "-B./build"]
+#        if c_binding_path:
+#            cmake_args=cmake_args + [ "-DC_BINDING_INSTALL_PREFIX={}".format(c_binding_path)]
+#            cmake_args=cmake_args + [ "-DPYTHON_VERSION=python{}.{}".format(sys.version_info.major, sys.version_info.minor)]
+#        if subprocess.call(cmake_args) != 0:
+#            raise EnvironmentError("error calling cmake")
+#    except OSError as e:
+#        if e.errno == errno.ENOENT:
+#            # CMake not found error.
+#            raise OSError(errno.ENOENT, os.strerror(errno.ENOENT), 'cmake')
+#        else:
+#           # Different error
+#           raise e
 
-    jobs = get_var("CMAKE_BUILD_PARALLEL_LEVEL")
-    jobs = "-j{}".format(jobs[0] if jobs else 1)
-    print("JOBS={}".format(jobs), flush=True)
-    if subprocess.call(["make", jobs, "-C", "./build"]) != 0:
-        raise EnvironmentError("error calling make build")
+#    jobs = get_var("CMAKE_BUILD_PARALLEL_LEVEL")
+#    jobs = "-j{}".format(jobs[0] if jobs else 1)
+#    print("JOBS={}".format(jobs), flush=True)
+#    if subprocess.call(["make", jobs, "-C", "./build"]) != 0:
+#        raise EnvironmentError("error calling make build")
 
-    if subprocess.call(["make", jobs, "-C", "./build", "install"]) != 0:
-        raise EnvironmentError("error calling make install")
+#    if subprocess.call(["make", jobs, "-C", "./build", "install"]) != 0:
+#        raise EnvironmentError("error calling make install")
 
 def get_var(var):
     value = os.environ.get(var,'')
@@ -62,12 +62,12 @@ def get_var(var):
 
 def setup_packages():
     # We first build C++ libraries
-    #if 'build' in sys.argv:
-    #    #cmake_build()
+    if 'build' in sys.argv:
+        cmake_build()
 
     # TODO use some flag to detect that build has already been done instead of this
-    #if 'install' in sys.argv:
-    #    #cmake_build()
+    if 'install' in sys.argv:
+        cmake_build()
 
     #extra_files = package_files('build/lib') + package_files('build/lib64')
 
