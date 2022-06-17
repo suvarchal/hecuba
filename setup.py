@@ -67,7 +67,7 @@ def setup_packages():
 
     # TODO use some flag to detect that build has already been done instead of this
     if 'install' in sys.argv:
-        cmake_build()
+        #cmake_build()
 
     extra_files = package_files('build/lib') + package_files('build/lib64')
 
