@@ -69,7 +69,7 @@ def setup_packages():
     if 'install' in sys.argv:
         #cmake_build()
 
-    extra_files = package_files('build/lib') + package_files('build/lib64')
+    #extra_files = package_files('build/lib') + package_files('build/lib64')
 
     PATH_LIBS = get_var('LD_LIBRARY_PATH')
     PATH_INCLUDE = get_var('CPATH') + get_var('CPLUS_INCLUDE_PATH') + get_var('C_INCLUDE_PATH')
