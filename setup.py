@@ -62,12 +62,12 @@ def get_var(var):
 
 def setup_packages():
     # We first build C++ libraries
-    if 'build' in sys.argv:
-        #cmake_build()
+    #if 'build' in sys.argv:
+    #    #cmake_build()
 
     # TODO use some flag to detect that build has already been done instead of this
-    if 'install' in sys.argv:
-        #cmake_build()
+    #if 'install' in sys.argv:
+    #    #cmake_build()
 
     #extra_files = package_files('build/lib') + package_files('build/lib64')
 
