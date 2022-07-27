@@ -125,7 +125,6 @@ static PyObject *get_row(HCache *self, PyObject *args) {
     std::vector<const TupleRow *> v;
     try {
         v = self->T->get_crow(k);
-        delete (k);
     }
     catch (std::exception &e) {
         std::string error_msg = "Get row error: " + std::string(e.what());
@@ -134,9 +133,12 @@ static PyObject *get_row(HCache *self, PyObject *args) {
     }
 
     if (v.empty()) {
-        PyErr_SetString(PyExc_KeyError, "No values found for this key");
+        std::string error_msg = "No values found for key: ";
+        error_msg += k->show_content() + " @ " + std::string(self->T->get_metadata()->get_keyspace()) + "." + std::string(self->T->get_metadata()->get_table_name());
+        PyErr_SetString(PyExc_KeyError, error_msg.c_str());
         return NULL;
     }
+    delete (k);
 
     try {
         if (self->T->get_metadata()->get_values()->empty()) {
@@ -503,9 +505,9 @@ static PyObject *get_block_ids(HNumpyStore *self, PyObject *args) {
         std::list<std::tuple<uint64_t, uint32_t, uint32_t, std::vector<uint32_t>>> clusters;
         clusters = self->NumpyDataStore->get_block_ids(np_metas->np_metas);
 
-        uint16_t nclusters = clusters.size();
+        uint32_t nclusters = clusters.size();
         result = PyList_New(nclusters);
-        uint16_t key_i = 0;
+        uint32_t key_i = 0;
         for (auto x : clusters) {
             std::vector<uint32_t> ccs = std::get<3>(x);
             PyObject * pyccs = PyTuple_New( ccs.size() );
